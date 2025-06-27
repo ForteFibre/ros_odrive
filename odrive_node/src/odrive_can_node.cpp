@@ -5,6 +5,7 @@
 #include "odrive_enums.h"
 
 #include <chrono>
+#include <cstdint>
 #include <sys/eventfd.h>
 
 enum CmdId : uint32_t {
@@ -21,6 +22,27 @@ enum CmdId : uint32_t {
     kGetBusVoltageCurrent = 0x017, // SystemStatus      - publisher
     kClearErrors = 0x018, // ClearErrors       - service
     kGetTorques = 0x01c, // ControllerStatus  - publisher
+
+};
+
+enum class ParamId : uint32_t {
+    SetLimits = 0x00f, // Velocity_Limit, Current_Limit
+    TrajVelLimit = 0x011, // Traj_Vel_Limit
+    TrajAccelLimits = 0x012, // Traj_Accel_Limit, Traj_Decel_Limit
+    TrajInertia = 0x013, // Traj_Inertia
+    AbsolutePosition = 0x019, // Position
+    PosGain = 0x01a, // Pos_Gain
+    VelGains = 0x01b, // Vel_Gain, Vel_Integrator_Gain
+};
+
+static const std::unordered_map<std::string, ParamId> param_name_to_id = {
+    {"traj_vel_limit", ParamId::TrajVelLimit},
+    {"traj_accel_limit", ParamId::TrajAccelLimits},
+    {"traj_inertia", ParamId::TrajInertia},
+    {"pos_gain", ParamId::PosGain},
+    {"vel_gains", ParamId::VelGains},
+    {"absolute_position", ParamId::AbsolutePosition},
+    {"set_limits", ParamId::SetLimits}
 };
 
 enum ControlMode : uint64_t {
@@ -61,6 +83,13 @@ ODriveCanNode::ODriveCanNode(const std::string& node_name) : rclcpp::Node(node_n
         std::bind(&ODriveCanNode::service_clear_errors_callback, this, _1, _2),
         srv_clear_errors_qos.get_rmw_qos_profile()
     );
+
+    rclcpp::QoS srv_set_parameters_qos(rclcpp::KeepAll{});
+    service_set_parameters_ = rclcpp::Node::create_service<SetParameters>(
+        "set_parameters",
+        std::bind(&ODriveCanNode::service_set_parameters_callback, this, _1, _2),
+        srv_clear_errors_qos.get_rmw_qos_profile()
+    );
 }
 
 void ODriveCanNode::deinit() {
@@ -96,6 +125,10 @@ bool ODriveCanNode::init(EpollEventLoop* event_loop) {
     }
     if (!srv_clear_errors_evt_.init(event_loop, std::bind(&ODriveCanNode::request_clear_errors_callback, this))) {
         RCLCPP_ERROR(rclcpp::Node::get_logger(), "Failed to initialize clear errors service event");
+        return false;
+    }
+    if (!srv_set_parameters_evt_.init(event_loop, std::bind(&ODriveCanNode::request_set_parameters_callback, this))) {
+        RCLCPP_ERROR(rclcpp::Node::get_logger(), "Failed to initialize set parameters service event");
         return false;
     }
     RCLCPP_INFO(rclcpp::Node::get_logger(), "node_id: %d", node_id_);
@@ -231,6 +264,30 @@ void ODriveCanNode::service_clear_errors_callback(
     srv_clear_errors_evt_.set();
 }
 
+void ODriveCanNode::service_set_parameters_callback(
+    const std::shared_ptr<SetParameters::Request> request,
+    std::shared_ptr<SetParameters::Response> response
+) {
+    {
+        std::lock_guard<std::mutex> guard(axis_state_mutex_);
+        if (axis_state_ != 1) {
+            RCLCPP_ERROR(rclcpp::Node::get_logger(), "Cannot set parameter while axis_state == %d", axis_state_);
+            RCLCPP_ERROR(rclcpp::Node::get_logger(), "Please set axis_state to IDLE (1) before setting parameters.");
+            return;
+        }
+    }
+
+    RCLCPP_INFO(rclcpp::Node::get_logger(), "setting parameter: %s = %f", request->param_name.c_str(), request->value);
+    auto it = param_name_to_id.find(request->param_name);
+    if (it == param_name_to_id.end()) {
+        RCLCPP_ERROR(rclcpp::Node::get_logger(), "Unknown parameter name: %s", request->param_name.c_str());
+        return;
+    }
+
+    param_request_data_ = request;
+    srv_set_parameters_evt_.set();
+}
+
 void ODriveCanNode::request_state_callback() {
     uint32_t axis_state;
     {
@@ -261,6 +318,23 @@ void ODriveCanNode::request_clear_errors_callback() {
     write_le<uint8_t>(0, frame.data);
     frame.can_dlc = 1;
     can_intf_.send_can_frame(frame);
+}
+
+void ODriveCanNode::request_set_parameters_callback() {
+    auto it = param_name_to_id.find(param_request_data_->param_name);
+    struct can_frame frame;
+    frame.can_id = (node_id_ << 5) | static_cast<uint32_t>(it->second);
+    write_le<float>(param_request_data_->value, frame.data);
+    frame.can_dlc = 4;
+    can_intf_.send_can_frame(frame);
+
+    RCLCPP_INFO(
+        rclcpp::Node::get_logger(),
+        "Sent parameter: %s (id: 0x%x) = %f",
+        param_request_data_->param_name.c_str(),
+        static_cast<uint32_t>(it->second),
+        param_request_data_->value
+    );
 }
 
 void ODriveCanNode::ctrl_msg_callback() {
