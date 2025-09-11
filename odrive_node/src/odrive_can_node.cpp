@@ -207,6 +207,14 @@ void ODriveCanNode::recv_callback(const can_frame& frame) {
             ctrl_pub_flag_ |= 0b1000;
             break;
         }
+        case CmdId::kSetAxisState:
+        case CmdId::kSetControllerMode:
+        case CmdId::kSetInputPos:
+        case CmdId::kSetInputVel:
+        case CmdId::kSetInputTorque:
+        case CmdId::kClearErrors: {
+            break; // Ignore commands coming from another master/host on the bus
+        }
         default: {
             // RCLCPP_WARN(
             //   rclcpp::Node::get_logger(), "Received unused message: ID = 0x%x", (frame.can_id & 0x1F));
@@ -242,12 +250,16 @@ void ODriveCanNode::service_callback(
     }
     srv_evt_.set();
 
+    // Wait for at least 1 second for a new heartbeat to arrive.
+    // If the requested state is something other than CLOSED_LOOP_CONTROL, also
+    // wait for the procedure to complete (procedure_result != BUSY).
     std::unique_lock<std::mutex> guard(ctrl_stat_mutex_); // define lock for controller status
     auto call_time = std::chrono::steady_clock::now();
-    fresh_heartbeat_.wait(guard, [this, &call_time]() {
-        bool complete = (this->ctrl_stat_.procedure_result != 1) && // make sure procedure_result is not busy
-                        (std::chrono::steady_clock::now() - call_time >= std::chrono::seconds(1)
-                        ); // wait for minimum one second
+    fresh_heartbeat_.wait(guard, [this, &call_time, &request]() {
+        bool is_busy = this->ctrl_stat_.procedure_result == ODriveProcedureResult::PROCEDURE_RESULT_BUSY;
+        bool requested_closed_loop = request->axis_requested_state == ODriveAxisState::AXIS_STATE_CLOSED_LOOP_CONTROL;
+        bool minimum_time_passed = (std::chrono::steady_clock::now() - call_time >= std::chrono::seconds(1));
+        bool complete = (requested_closed_loop || !is_busy) && minimum_time_passed;
         return complete;
     }); // wait for procedure_result
 
