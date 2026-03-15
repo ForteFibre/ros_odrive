@@ -10,6 +10,7 @@ find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 find_package(std_srvs REQUIRED)
+find_package(can_on_ros2 REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/ControlMessage.msg"
@@ -24,13 +25,12 @@ include_directories(include)
 include_directories(../odrive_base/include)
 
 add_executable(odrive_can_node 
-  ../odrive_base/src/epoll_event_loop.cpp
-  ../odrive_base/src/socket_can.cpp
   src/odrive_can_node.cpp
   src/main.cpp
   include/odrive_can_node.hpp)
 
 ament_target_dependencies(odrive_can_node
+  can_on_ros2
   rclcpp
   std_srvs
 )

@@ -1,12 +1,11 @@
 #include "odrive_can_node.hpp"
 
 #include "byte_swap.hpp"
-#include "epoll_event_loop.hpp"
 #include "odrive_enums.h"
 
 #include <chrono>
 #include <cstdint>
-#include <sys/eventfd.h>
+#include <cstring>
 
 enum CmdId : uint32_t {
     kHeartbeat = 0x001, // ControllerStatus  - publisher
@@ -53,7 +52,7 @@ enum ControlMode : uint64_t {
 };
 
 ODriveCanNode::ODriveCanNode(const std::string& node_name) : rclcpp::Node(node_name) {
-    rclcpp::Node::declare_parameter<std::string>("interface", "can0");
+    rclcpp::Node::declare_parameter<std::string>("interface", "can1");
     rclcpp::Node::declare_parameter<uint16_t>("node_id", 0);
     rclcpp::Node::declare_parameter<bool>("axis_idle_on_shutdown", false);
 
@@ -93,42 +92,38 @@ ODriveCanNode::ODriveCanNode(const std::string& node_name) : rclcpp::Node(node_n
 }
 
 void ODriveCanNode::deinit() {
-    if (axis_idle_on_shutdown_) {
-        struct can_frame frame;
-        frame.can_id = node_id_ << 5 | CmdId::kSetAxisState;
-        write_le<uint32_t>(ODriveAxisState::AXIS_STATE_IDLE, frame.data);
-        frame.can_dlc = 4;
-        can_intf_.send_can_frame(frame);
+    if (axis_idle_on_shutdown_ && can_client_) {
+        can_client_->send_serialized(
+            make_arb_id(node_id_, CmdId::kSetAxisState),
+            static_cast<uint32_t>(ODriveAxisState::AXIS_STATE_IDLE)
+        );
     }
 
-    sub_evt_.deinit();
-    srv_evt_.deinit();
-    can_intf_.deinit();
+    recv_handle_.reset();
+    can_client_.reset();
+    can_.reset();
 }
 
-bool ODriveCanNode::init(EpollEventLoop* event_loop) {
+bool ODriveCanNode::init() {
     node_id_ = rclcpp::Node::get_parameter("node_id").as_int();
     axis_idle_on_shutdown_ = rclcpp::Node::get_parameter("axis_idle_on_shutdown").as_bool();
     std::string interface = rclcpp::Node::get_parameter("interface").as_string();
 
-    if (!can_intf_.init(interface, event_loop, std::bind(&ODriveCanNode::recv_callback, this, _1))) {
-        RCLCPP_ERROR(rclcpp::Node::get_logger(), "Failed to initialize socket can interface: %s", interface.c_str());
-        return false;
-    }
-    if (!sub_evt_.init(event_loop, std::bind(&ODriveCanNode::ctrl_msg_callback, this))) {
-        RCLCPP_ERROR(rclcpp::Node::get_logger(), "Failed to initialize subscriber event");
-        return false;
-    }
-    if (!srv_evt_.init(event_loop, std::bind(&ODriveCanNode::request_state_callback, this))) {
-        RCLCPP_ERROR(rclcpp::Node::get_logger(), "Failed to initialize service event");
-        return false;
-    }
-    if (!srv_clear_errors_evt_.init(event_loop, std::bind(&ODriveCanNode::request_clear_errors_callback, this))) {
-        RCLCPP_ERROR(rclcpp::Node::get_logger(), "Failed to initialize clear errors service event");
-        return false;
-    }
-    if (!srv_set_parameters_evt_.init(event_loop, std::bind(&ODriveCanNode::request_set_parameters_callback, this))) {
-        RCLCPP_ERROR(rclcpp::Node::get_logger(), "Failed to initialize set parameters service event");
+    try {
+        can_ = std::make_unique<can_on_ros2::AsyncSocketCAN>(interface);
+        can_->set_error_callback([logger = get_logger()](const std::string& error) {
+            RCLCPP_ERROR(logger, "AsyncSocketCAN error: %s", error.c_str());
+        });
+        can_client_ = std::make_unique<can_on_ros2::AsyncCanClient>(*can_);
+        can_client_->add_filter(make_arb_id(node_id_, 0), 0x7E0);
+        recv_handle_ = can_client_->add_receiver(std::bind(&ODriveCanNode::recv_callback, this, _1));
+    } catch (const std::exception& e) {
+        RCLCPP_ERROR(
+            rclcpp::Node::get_logger(),
+            "Failed to initialize socket can interface %s: %s",
+            interface.c_str(),
+            e.what()
+        );
         return false;
     }
     RCLCPP_INFO(rclcpp::Node::get_logger(), "node_id: %d", node_id_);
@@ -136,13 +131,25 @@ bool ODriveCanNode::init(EpollEventLoop* event_loop) {
     return true;
 }
 
-void ODriveCanNode::recv_callback(const can_frame& frame) {
-    if (((frame.can_id >> 5) & 0x3F) != node_id_)
+uint32_t ODriveCanNode::make_arb_id(uint16_t node_id, uint32_t cmd_id) {
+    return (static_cast<uint32_t>(node_id) << 5) | cmd_id;
+}
+
+bool ODriveCanNode::send_frame(const can_on_ros2::CanFrame& frame) {
+    if (!can_client_) {
+        RCLCPP_ERROR(get_logger(), "CAN client is not initialized");
+        return false;
+    }
+    return can_client_->send(frame);
+}
+
+void ODriveCanNode::recv_callback(const can_on_ros2::CanFrame& frame) {
+    if (((frame.id >> 5) & 0x3F) != node_id_)
         return;
 
-    switch (frame.can_id & 0x1F) {
+    switch (frame.id & 0x1F) {
         case CmdId::kHeartbeat: {
-            if (!verify_length("kHeartbeat", 8, frame.can_dlc))
+            if (!verify_length("kHeartbeat", 8, frame.dlc))
                 break;
             std::lock_guard<std::mutex> guard(ctrl_stat_mutex_);
             ctrl_stat_.active_errors = read_le<uint32_t>(frame.data + 0);
@@ -154,7 +161,7 @@ void ODriveCanNode::recv_callback(const can_frame& frame) {
             break;
         }
         case CmdId::kGetError: {
-            if (!verify_length("kGetError", 8, frame.can_dlc))
+            if (!verify_length("kGetError", 8, frame.dlc))
                 break;
             std::lock_guard<std::mutex> guard(odrv_stat_mutex_);
             odrv_stat_.active_errors = read_le<uint32_t>(frame.data + 0);
@@ -163,7 +170,7 @@ void ODriveCanNode::recv_callback(const can_frame& frame) {
             break;
         }
         case CmdId::kGetEncoderEstimates: {
-            if (!verify_length("kGetEncoderEstimates", 8, frame.can_dlc))
+            if (!verify_length("kGetEncoderEstimates", 8, frame.dlc))
                 break;
             std::lock_guard<std::mutex> guard(ctrl_stat_mutex_);
             ctrl_stat_.pos_estimate = read_le<float>(frame.data + 0);
@@ -172,7 +179,7 @@ void ODriveCanNode::recv_callback(const can_frame& frame) {
             break;
         }
         case CmdId::kGetIq: {
-            if (!verify_length("kGetIq", 8, frame.can_dlc))
+            if (!verify_length("kGetIq", 8, frame.dlc))
                 break;
             std::lock_guard<std::mutex> guard(ctrl_stat_mutex_);
             ctrl_stat_.iq_setpoint = read_le<float>(frame.data + 0);
@@ -181,7 +188,7 @@ void ODriveCanNode::recv_callback(const can_frame& frame) {
             break;
         }
         case CmdId::kGetTemp: {
-            if (!verify_length("kGetTemp", 8, frame.can_dlc))
+            if (!verify_length("kGetTemp", 8, frame.dlc))
                 break;
             std::lock_guard<std::mutex> guard(odrv_stat_mutex_);
             odrv_stat_.fet_temperature = read_le<float>(frame.data + 0);
@@ -190,7 +197,7 @@ void ODriveCanNode::recv_callback(const can_frame& frame) {
             break;
         }
         case CmdId::kGetBusVoltageCurrent: {
-            if (!verify_length("kGetBusVoltageCurrent", 8, frame.can_dlc))
+            if (!verify_length("kGetBusVoltageCurrent", 8, frame.dlc))
                 break;
             std::lock_guard<std::mutex> guard(odrv_stat_mutex_);
             odrv_stat_.bus_voltage = read_le<float>(frame.data + 0);
@@ -199,7 +206,7 @@ void ODriveCanNode::recv_callback(const can_frame& frame) {
             break;
         }
         case CmdId::kGetTorques: {
-            if (!verify_length("kGetTorques", 8, frame.can_dlc))
+            if (!verify_length("kGetTorques", 8, frame.dlc))
                 break;
             std::lock_guard<std::mutex> guard(ctrl_stat_mutex_);
             ctrl_stat_.torque_target = read_le<float>(frame.data + 0);
@@ -236,7 +243,7 @@ void ODriveCanNode::recv_callback(const can_frame& frame) {
 void ODriveCanNode::subscriber_callback(const ControlMessage::SharedPtr msg) {
     std::lock_guard<std::mutex> guard(ctrl_msg_mutex_);
     ctrl_msg_ = *msg;
-    sub_evt_.set();
+    ctrl_msg_callback();
 }
 
 void ODriveCanNode::service_callback(
@@ -248,7 +255,7 @@ void ODriveCanNode::service_callback(
         axis_state_ = request->axis_requested_state;
         RCLCPP_INFO(rclcpp::Node::get_logger(), "requesting axis state: %d", axis_state_);
     }
-    srv_evt_.set();
+    request_state_callback();
 
     // Wait for at least 1 second for a new heartbeat to arrive.
     // If the requested state is something other than CLOSED_LOOP_CONTROL, also
@@ -272,14 +279,17 @@ void ODriveCanNode::service_clear_errors_callback(
     const std::shared_ptr<Empty::Request> request,
     std::shared_ptr<Empty::Response> response
 ) {
+    (void)request;
+    (void)response;
     RCLCPP_INFO(rclcpp::Node::get_logger(), "clearing errors");
-    srv_clear_errors_evt_.set();
+    request_clear_errors_callback();
 }
 
 void ODriveCanNode::service_set_parameters_callback(
     const std::shared_ptr<SetParameters::Request> request,
     std::shared_ptr<SetParameters::Response> response
 ) {
+    (void)response;
     {
         std::lock_guard<std::mutex> guard(axis_state_mutex_);
         if (axis_state_ != 1) {
@@ -297,7 +307,7 @@ void ODriveCanNode::service_set_parameters_callback(
     }
 
     param_request_data_ = request;
-    srv_set_parameters_evt_.set();
+    request_set_parameters_callback();
 }
 
 void ODriveCanNode::request_state_callback() {
@@ -307,38 +317,40 @@ void ODriveCanNode::request_state_callback() {
         axis_state = axis_state_;
     }
 
-    struct can_frame frame;
+    can_on_ros2::CanFrame frame{};
+    std::memset(frame.data, 0, sizeof(frame.data));
 
     if (axis_state != 0) {
         // Clear errors if requested state is not IDLE
-        frame.can_id = node_id_ << 5 | CmdId::kClearErrors;
+        frame.id = make_arb_id(node_id_, CmdId::kClearErrors);
         write_le<uint8_t>(0, frame.data);
-        frame.can_dlc = 1;
-        can_intf_.send_can_frame(frame);
+        frame.dlc = 1;
+        send_frame(frame);
     }
 
     // Set state
-    frame.can_id = node_id_ << 5 | CmdId::kSetAxisState;
+    frame = can_on_ros2::CanFrame{};
+    frame.id = make_arb_id(node_id_, CmdId::kSetAxisState);
     write_le<uint32_t>(axis_state, frame.data);
-    frame.can_dlc = 4;
-    can_intf_.send_can_frame(frame);
+    frame.dlc = 4;
+    send_frame(frame);
 }
 
 void ODriveCanNode::request_clear_errors_callback() {
-    struct can_frame frame;
-    frame.can_id = node_id_ << 5 | CmdId::kClearErrors;
+    can_on_ros2::CanFrame frame{};
+    frame.id = make_arb_id(node_id_, CmdId::kClearErrors);
     write_le<uint8_t>(0, frame.data);
-    frame.can_dlc = 1;
-    can_intf_.send_can_frame(frame);
+    frame.dlc = 1;
+    send_frame(frame);
 }
 
 void ODriveCanNode::request_set_parameters_callback() {
     auto it = param_name_to_id.find(param_request_data_->param_name);
-    struct can_frame frame;
-    frame.can_id = (node_id_ << 5) | static_cast<uint32_t>(it->second);
+    can_on_ros2::CanFrame frame{};
+    frame.id = make_arb_id(node_id_, static_cast<uint32_t>(it->second));
     write_le<float>(param_request_data_->value, frame.data);
-    frame.can_dlc = 4;
-    can_intf_.send_can_frame(frame);
+    frame.dlc = 4;
+    send_frame(frame);
 
     RCLCPP_INFO(
         rclcpp::Node::get_logger(),
@@ -351,18 +363,18 @@ void ODriveCanNode::request_set_parameters_callback() {
 
 void ODriveCanNode::ctrl_msg_callback() {
     uint32_t control_mode;
-    struct can_frame frame;
-    frame.can_id = node_id_ << 5 | kSetControllerMode;
+    can_on_ros2::CanFrame frame{};
+    frame.id = make_arb_id(node_id_, kSetControllerMode);
     {
         std::lock_guard<std::mutex> guard(ctrl_msg_mutex_);
         write_le<uint32_t>(ctrl_msg_.control_mode, frame.data);
         write_le<uint32_t>(ctrl_msg_.input_mode, frame.data + 4);
         control_mode = ctrl_msg_.control_mode;
     }
-    frame.can_dlc = 8;
-    can_intf_.send_can_frame(frame);
+    frame.dlc = 8;
+    send_frame(frame);
 
-    frame = can_frame{};
+    frame = can_on_ros2::CanFrame{};
     switch (control_mode) {
         case ControlMode::kVoltageControl: {
             RCLCPP_ERROR(rclcpp::Node::get_logger(), "Voltage Control Mode (0) is not currently supported");
@@ -370,35 +382,35 @@ void ODriveCanNode::ctrl_msg_callback() {
         }
         case ControlMode::kTorqueControl: {
             RCLCPP_DEBUG(rclcpp::Node::get_logger(), "input_torque");
-            frame.can_id = node_id_ << 5 | kSetInputTorque;
+            frame.id = make_arb_id(node_id_, kSetInputTorque);
             std::lock_guard<std::mutex> guard(ctrl_msg_mutex_);
             write_le<float>(ctrl_msg_.input_torque, frame.data);
-            frame.can_dlc = 4;
+            frame.dlc = 4;
             break;
         }
         case ControlMode::kVelocityControl: {
             RCLCPP_DEBUG(rclcpp::Node::get_logger(), "input_vel");
-            frame.can_id = node_id_ << 5 | kSetInputVel;
+            frame.id = make_arb_id(node_id_, kSetInputVel);
             std::lock_guard<std::mutex> guard(ctrl_msg_mutex_);
             write_le<float>(ctrl_msg_.input_vel, frame.data);
             write_le<float>(ctrl_msg_.input_torque, frame.data + 4);
-            frame.can_dlc = 8;
+            frame.dlc = 8;
             break;
         }
         case ControlMode::kPositionControl: {
             RCLCPP_DEBUG(rclcpp::Node::get_logger(), "input_pos");
-            frame.can_id = node_id_ << 5 | kSetInputPos;
+            frame.id = make_arb_id(node_id_, kSetInputPos);
             std::lock_guard<std::mutex> guard(ctrl_msg_mutex_);
             write_le<float>(ctrl_msg_.input_pos, frame.data);
             write_le<int8_t>(((int8_t)((ctrl_msg_.input_vel) * 1000)), frame.data + 4);
             write_le<int8_t>(((int8_t)((ctrl_msg_.input_torque) * 1000)), frame.data + 6);
-            frame.can_dlc = 8;
+            frame.dlc = 8;
             break;
         }
         default: RCLCPP_ERROR(rclcpp::Node::get_logger(), "unsupported control_mode: %d", control_mode); return;
     }
 
-    can_intf_.send_can_frame(frame);
+    send_frame(frame);
 }
 
 inline bool ODriveCanNode::verify_length(const std::string& name, uint8_t expected, uint8_t length) {

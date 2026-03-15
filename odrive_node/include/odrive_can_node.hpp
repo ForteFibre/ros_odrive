@@ -6,15 +6,17 @@
 #include "odrive_can/msg/o_drive_status.hpp"
 #include "odrive_can/srv/axis_state.hpp"
 #include "odrive_can/srv/set_parameters.hpp"
-#include "socket_can.hpp"
 #include "std_srvs/srv/empty.hpp"
+
+#include "can_on_ros2/async_socketcan.hpp"
+#include "can_on_ros2/client/async_can_client.hpp"
+#include <fibril/utils/callback_handle.hpp>
 
 #include <algorithm>
 #include <array>
 #include <condition_variable>
 #include <cstdint>
-#include <linux/can.h>
-#include <linux/can/raw.h>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <rclcpp/rclcpp.hpp>
@@ -33,11 +35,11 @@ using SetParameters = odrive_can::srv::SetParameters;
 class ODriveCanNode : public rclcpp::Node {
 public:
     ODriveCanNode(const std::string& node_name);
-    bool init(EpollEventLoop* event_loop);
+    bool init();
     void deinit();
 
 private:
-    void recv_callback(const can_frame& frame);
+    void recv_callback(const can_on_ros2::CanFrame& frame);
     void subscriber_callback(const ControlMessage::SharedPtr msg);
     void service_callback(
         const std::shared_ptr<AxisState::Request> request,
@@ -56,10 +58,14 @@ private:
     void request_set_parameters_callback();
     void ctrl_msg_callback();
     inline bool verify_length(const std::string& name, uint8_t expected, uint8_t length);
+    bool send_frame(const can_on_ros2::CanFrame& frame);
+    static uint32_t make_arb_id(uint16_t node_id, uint32_t cmd_id);
 
     uint16_t node_id_;
     bool axis_idle_on_shutdown_;
-    SocketCanIntf can_intf_ = SocketCanIntf();
+    std::unique_ptr<can_on_ros2::AsyncSocketCAN> can_;
+    std::unique_ptr<can_on_ros2::AsyncCanClient> can_client_;
+    fibril::CallbackHandle::SharedPtr recv_handle_;
 
     short int ctrl_pub_flag_ = 0;
     std::mutex ctrl_stat_mutex_;
@@ -71,21 +77,17 @@ private:
     ODriveStatus odrv_stat_ = ODriveStatus();
     rclcpp::Publisher<ODriveStatus>::SharedPtr odrv_publisher_;
 
-    EpollEvent sub_evt_;
     std::mutex ctrl_msg_mutex_;
     ControlMessage ctrl_msg_ = ControlMessage();
     rclcpp::Subscription<ControlMessage>::SharedPtr subscriber_;
 
-    EpollEvent srv_evt_;
     uint32_t axis_state_;
     std::mutex axis_state_mutex_;
     std::condition_variable fresh_heartbeat_;
     rclcpp::Service<AxisState>::SharedPtr service_;
 
-    EpollEvent srv_clear_errors_evt_;
     rclcpp::Service<Empty>::SharedPtr service_clear_errors_;
 
-    EpollEvent srv_set_parameters_evt_;
     std::shared_ptr<SetParameters::Request> param_request_data_;
     rclcpp::Service<SetParameters>::SharedPtr service_set_parameters_;
 };
