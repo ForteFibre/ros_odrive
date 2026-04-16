@@ -5,7 +5,7 @@
 #include "odrive_can/msg/controller_status.hpp"
 #include "odrive_can/msg/o_drive_status.hpp"
 #include "odrive_can/srv/axis_state.hpp"
-#include "odrive_can/srv/set_parameters.hpp"
+#include "odrive_can/srv/set_configs.hpp"
 #include "socket_can.hpp"
 #include "std_srvs/srv/empty.hpp"
 
@@ -47,13 +47,13 @@ private:
         const std::shared_ptr<Empty::Request> request,
         std::shared_ptr<Empty::Response> response
     );
-    void service_set_parameters_callback(
+    void service_set_configs_callback(
         const std::shared_ptr<SetParameters::Request> request,
         std::shared_ptr<SetParameters::Response> response
     );
     void request_state_callback();
     void request_clear_errors_callback();
-    void request_set_parameters_callback();
+    void request_set_configs_callback();
     void ctrl_msg_callback();
     inline bool verify_length(const std::string& name, uint8_t expected, uint8_t length);
 
@@ -85,9 +85,9 @@ private:
     EpollEvent srv_clear_errors_evt_;
     rclcpp::Service<Empty>::SharedPtr service_clear_errors_;
 
-    EpollEvent srv_set_parameters_evt_;
+    EpollEvent srv_set_configs_evt_;
     std::shared_ptr<SetParameters::Request> param_request_data_;
-    rclcpp::Service<SetParameters>::SharedPtr service_set_parameters_;
+    rclcpp::Service<SetParameters>::SharedPtr service_set_configs_;
 };
 
 #endif // ODRIVE_CAN_NODE_HPP
