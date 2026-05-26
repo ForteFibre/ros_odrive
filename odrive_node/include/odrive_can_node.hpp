@@ -5,7 +5,7 @@
 #include "odrive_can/msg/controller_status.hpp"
 #include "odrive_can/msg/o_drive_status.hpp"
 #include "odrive_can/srv/axis_state.hpp"
-#include "odrive_can/srv/set_configs.hpp"
+#include "odrive_can/srv/set_parameters.hpp"
 #include "socket_can.hpp"
 #include "std_srvs/srv/empty.hpp"
 
