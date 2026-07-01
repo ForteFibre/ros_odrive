@@ -85,7 +85,7 @@ ODriveCanNode::ODriveCanNode(const std::string& node_name) : rclcpp::Node(node_n
     );
 
     rclcpp::QoS srv_set_configs_qos(rclcpp::KeepAll{});
-    service_set_configs_ = rclcpp::Node::create_service<SetParameters>(
+    service_set_configs_ = rclcpp::Node::create_service<SetConfigs>(
         "set_configs",
         std::bind(&ODriveCanNode::service_set_configs_callback, this, _1, _2),
         srv_clear_errors_qos.get_rmw_qos_profile()
@@ -94,7 +94,7 @@ ODriveCanNode::ODriveCanNode(const std::string& node_name) : rclcpp::Node(node_n
 
 void ODriveCanNode::deinit() {
     if (axis_idle_on_shutdown_) {
-        struct can_frame frame;
+        struct can_frame frame {};
         frame.can_id = node_id_ << 5 | CmdId::kSetAxisState;
         write_le<uint32_t>(ODriveAxisState::AXIS_STATE_IDLE, frame.data);
         frame.can_dlc = 4;
@@ -277,8 +277,8 @@ void ODriveCanNode::service_clear_errors_callback(
 }
 
 void ODriveCanNode::service_set_configs_callback(
-    const std::shared_ptr<SetParameters::Request> request,
-    std::shared_ptr<SetParameters::Response> response
+    const std::shared_ptr<SetConfigs::Request> request,
+    std::shared_ptr<SetConfigs::Response> response
 ) {
     {
         std::lock_guard<std::mutex> guard(axis_state_mutex_);
@@ -307,7 +307,7 @@ void ODriveCanNode::request_state_callback() {
         axis_state = axis_state_;
     }
 
-    struct can_frame frame;
+    struct can_frame frame {};
 
     if (axis_state != 0) {
         // Clear errors if requested state is not IDLE
@@ -325,7 +325,7 @@ void ODriveCanNode::request_state_callback() {
 }
 
 void ODriveCanNode::request_clear_errors_callback() {
-    struct can_frame frame;
+    struct can_frame frame {};
     frame.can_id = node_id_ << 5 | CmdId::kClearErrors;
     write_le<uint8_t>(0, frame.data);
     frame.can_dlc = 1;
@@ -334,10 +334,23 @@ void ODriveCanNode::request_clear_errors_callback() {
 
 void ODriveCanNode::request_set_configs_callback() {
     auto it = config_name_to_id.find(param_request_data_->param_name);
-    struct can_frame frame;
+
+    struct can_frame frame {};
     frame.can_id = (node_id_ << 5) | static_cast<uint32_t>(it->second);
-    write_le<float>(param_request_data_->value, frame.data);
-    frame.can_dlc = 4;
+
+    if (it->second == ParamId::TrajAccelLimits) {
+        // ODrive CAN Set_Traj_Accel_Limits:
+        // float accel_limit
+        // float decel_limit
+        // 暫定的に同じ値を両方へ入れる
+        write_le<float>(param_request_data_->value, frame.data + 0);
+        write_le<float>(param_request_data_->value, frame.data + 4);
+        frame.can_dlc = 8;
+    } else {
+        write_le<float>(param_request_data_->value, frame.data);
+        frame.can_dlc = 4;
+    }
+
     can_intf_.send_can_frame(frame);
 
     RCLCPP_INFO(
@@ -351,7 +364,7 @@ void ODriveCanNode::request_set_configs_callback() {
 
 void ODriveCanNode::ctrl_msg_callback() {
     uint32_t control_mode;
-    struct can_frame frame;
+    struct can_frame frame {};
     frame.can_id = node_id_ << 5 | kSetControllerMode;
     {
         std::lock_guard<std::mutex> guard(ctrl_msg_mutex_);

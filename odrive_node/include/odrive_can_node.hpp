@@ -5,7 +5,7 @@
 #include "odrive_can/msg/controller_status.hpp"
 #include "odrive_can/msg/o_drive_status.hpp"
 #include "odrive_can/srv/axis_state.hpp"
-#include "odrive_can/srv/set_parameters.hpp"
+#include "odrive_can/srv/set_configs.hpp"
 #include "socket_can.hpp"
 #include "std_srvs/srv/empty.hpp"
 
@@ -28,7 +28,7 @@ using ControlMessage = odrive_can::msg::ControlMessage;
 
 using AxisState = odrive_can::srv::AxisState;
 using Empty = std_srvs::srv::Empty;
-using SetParameters = odrive_can::srv::SetParameters;
+using SetConfigs = odrive_can::srv::SetConfigs;
 
 class ODriveCanNode : public rclcpp::Node {
 public:
@@ -48,8 +48,8 @@ private:
         std::shared_ptr<Empty::Response> response
     );
     void service_set_configs_callback(
-        const std::shared_ptr<SetParameters::Request> request,
-        std::shared_ptr<SetParameters::Response> response
+        const std::shared_ptr<SetConfigs::Request> request,
+        std::shared_ptr<SetConfigs::Response> response
     );
     void request_state_callback();
     void request_clear_errors_callback();
@@ -86,8 +86,8 @@ private:
     rclcpp::Service<Empty>::SharedPtr service_clear_errors_;
 
     EpollEvent srv_set_configs_evt_;
-    std::shared_ptr<SetParameters::Request> param_request_data_;
-    rclcpp::Service<SetParameters>::SharedPtr service_set_configs_;
+    std::shared_ptr<SetConfigs::Request> param_request_data_;
+    rclcpp::Service<SetConfigs>::SharedPtr service_set_configs_;
 };
 
 #endif // ODRIVE_CAN_NODE_HPP
