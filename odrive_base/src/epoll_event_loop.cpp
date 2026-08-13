@@ -1,14 +1,37 @@
 #include "epoll_event_loop.hpp"
 
-EpollEventLoop::EpollEventLoop() { epollfd = epoll_create1(0); }
+EpollEventLoop::EpollEventLoop()
+{
+  epollfd = epoll_create1(0);
+  wake_fd_ = eventfd(0, EFD_NONBLOCK);
+  wake_context_ = EventContext{wake_fd_, [](uint32_t) {}, true};
+  struct epoll_event ev {};
+  ev.events = EPOLLIN;
+  ev.data.ptr = &wake_context_;
+  if (epollfd >= 0 && wake_fd_ >= 0) {
+    epoll_ctl(epollfd, EPOLL_CTL_ADD, wake_fd_, &ev);
+  }
+}
 
-EpollEventLoop::~EpollEventLoop() { close(epollfd); }
+EpollEventLoop::~EpollEventLoop()
+{
+  for (auto * event : retired_events_) {
+    delete event;
+  }
+  if (wake_fd_ >= 0) {
+    close(wake_fd_);
+  }
+  close(epollfd);
+}
 
 bool EpollEventLoop::register_event(
   EvtId * p_evt, int fd, uint32_t events, const Callback & callback)
 {
-  EventContext * ctx = new EventContext{fd, callback};
-  struct epoll_event ev = {.events = events, .data = {.ptr = ctx}};
+  std::lock_guard<std::recursive_mutex> guard(registration_mutex_);
+  EventContext * ctx = new EventContext{fd, callback, true};
+  struct epoll_event ev {};
+  ev.events = events;
+  ev.data.ptr = ctx;
   if (epoll_ctl(epollfd, EPOLL_CTL_ADD, fd, &ev) == -1) {
     delete ctx;  // Cleanup the dynamically allocated EventContext in case of failure
     return false;
@@ -16,27 +39,43 @@ bool EpollEventLoop::register_event(
 
   if (p_evt) *p_evt = ctx;
 
-  n_events_++;
+  n_events_.fetch_add(1);
   return true;
 }
 
 bool EpollEventLoop::deregister_event(EvtId evt)
 {
+  std::lock_guard<std::recursive_mutex> guard(registration_mutex_);
   if (evt == nullptr) return false;
   if (epoll_ctl(epollfd, EPOLL_CTL_DEL, evt->fd, nullptr) == -1) return false;
-  drop_event(evt);
-  delete evt;
+  evt->active = false;
+  // A concurrent epoll_wait may already have copied evt into its returned
+  // array. Keep the tiny context alive until the joined loop is destroyed.
+  retired_events_.push_back(evt);
+  n_events_.fetch_sub(1);
+  const uint64_t wake_value = 1;
+  if (wake_fd_ >= 0) {
+    (void)write(wake_fd_, &wake_value, sizeof(wake_value));
+  }
   return true;
 }
 
 bool EpollEventLoop::run_until_empty()
 {
-  while (n_events_) {
+  while (has_events()) {
     n_triggered_events_ = epoll_wait(epollfd, triggered_events_, kMaxEventsPerIteration, -1);
     if (n_triggered_events_ == -1) return false;
     for (int i = 0; i < n_triggered_events_; ++i) {
       EventContext * handler = static_cast<EventContext *>(triggered_events_[i].data.ptr);
-      handler->callback(triggered_events_[i].events);
+      if (handler == &wake_context_) {
+        uint64_t wake_value;
+        while (read(wake_fd_, &wake_value, sizeof(wake_value)) == sizeof(wake_value)) {}
+      } else if (handler != nullptr) {
+        std::lock_guard<std::recursive_mutex> guard(registration_mutex_);
+        if (handler->active) {
+          handler->callback(triggered_events_[i].events);
+        }
+      }
     }
   }
   return true;

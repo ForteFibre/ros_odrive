@@ -25,7 +25,7 @@ private:
   std::string interface_;
   int socket_id_ = -1;
   EpollEventLoop * event_loop_ = nullptr;
-  EpollEventLoop::EvtId socket_evt_id_;
+  EpollEventLoop::EvtId socket_evt_id_{nullptr};
   FrameProcessor frame_processor_;
   bool broken_ = false;
 

@@ -11,6 +11,13 @@ For information about installation, prerequisites and getting started, check out
 * `node_id`: The node_id of the device this node will attach to
 * `interface`: the network interface name for the can bus
 * `axis_idle_on_shutdown`: Whether to set ODrive to IDLE state when the node is terminated
+* `axis_state_response_timeout_sec`: Maximum wait for a fresh completion heartbeat after an axis-state CAN request
+* `can_send_timeout_sec`: Short transport-liveness bound for the ROS callback to event-loop CAN write handoff
+* `emergency_stop_topic`: Lower-layer emergency stop heartbeat topic
+* `require_emergency_stop`: Require exactly one fresh released heartbeat before any energizing command (default `false` for generic driver use)
+* `emergency_stop_timeout_sec`: Emergency heartbeat freshness timeout
+* `emergency_stop_check_period_sec`: Unsafe-state check and repeated IDLE request period
+* `require_unique_control_message_publisher`: Require exactly one `/control_message` publisher (default `false`)
 
 ### Subscribes to
 
@@ -32,7 +39,7 @@ For information about installation, prerequisites and getting started, check out
   - `temperature_msg_rate_ms`
   - `bus_voltage_msg_rate_ms`
 
-  The ROS node will wait until one of each of these CAN messages has arrived before it emits a message on the `odrive_status` topic. Therefore, the largest period set here will dictate the period of the ROS2 message as well.
+  The ROS node waits until one of each message has initialized the aggregate, then emits `odrive_status` only when a fresh `Get_Error` frame arrives. Unrelated traffic cannot refresh cached error state.
 
 * `/controller_status`: Provides Controller level status updates. 
 
@@ -43,22 +50,23 @@ For information about installation, prerequisites and getting started, check out
   - `iq_msg_rate_ms`
   - `torques_msg_rate_ms`
 
-  The ROS node will wait until one of each of these CAN messages has arrived before it emits a message on the `controller_status` topic. Therefore, the largest period set here will dictate the period of the ROS2 message as well.
+  The ROS node waits until one of each message has initialized the aggregate, then emits `controller_status` only when a fresh heartbeat arrives. Unrelated traffic cannot refresh a cached axis/procedure state.
 
 ### Services
 
 * `/request_axis_state`: Sets the axes requested state.
 
-  This service requires regular heartbeat messages from the ODrive to determine the procedure result and will block until the procedure completes, with a minimum call time of 1 second.
+  This service requires regular heartbeat messages from the ODrive to determine the procedure result and will block until the procedure completes, with a minimum call time of 1 second. Completion always requires a heartbeat received after the matching CAN request was sent.
 
-  If the requested state is anything other than IDLE, this sends a `clear_errors` request to the ODrive (see below) before sending the state request.
+  This service does not clear errors implicitly. Fault acknowledgement is a separate, explicit `/clear_errors` operation.
 
 * `/clear_errors`: Manual service call to clear disarm_reason and procedure_result, reset the LED color and re-arm the brake resistor if applicable. See also [`clear_errors()`](https://docs.odriverobotics.com/v/latest/fibre_types/com_odriverobotics_ODrive.html#ODrive.clear_errors).
 
   This does not affect the axis state.
 
-  If the axis dropped into IDLE because of an error and the intent is to re-enable it, call `/request_axis_state`
-  instead with CLOSED_LOOP_CONTROL, which clears errors automatically.
+  If the axis dropped into IDLE because of an error, call `/clear_errors` explicitly, verify fresh error-free status, and only then request CLOSED_LOOP_CONTROL.
+
+* `/set_configs`: Sends one supported configuration CAN frame. The service response is returned only after the event-loop thread attempted the socket write; `success=false` means the frame was not sent. This is a transport acknowledgement, not an ODrive readback.
 
 ### Data Types
 

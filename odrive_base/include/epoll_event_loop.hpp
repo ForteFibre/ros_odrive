@@ -5,8 +5,10 @@
 #include <sys/eventfd.h>
 #include <unistd.h>
 
+#include <atomic>
 #include <functional>
 #include <iostream>
+#include <mutex>
 #include <vector>
 
 using std::placeholders::_1;
@@ -19,6 +21,7 @@ public:
   {
     int fd;
     Callback callback;
+    bool active{true};
   };
 
   using EvtId = EventContext *;
@@ -31,6 +34,8 @@ public:
 
   bool deregister_event(EvtId evt);
 
+  bool has_events() const { return n_events_.load() != 0; }
+
   bool run_until_empty();
 
   void drop_event(EvtId evt);
@@ -38,7 +43,11 @@ public:
 private:
   static constexpr size_t kMaxEventsPerIteration = 16;
   int epollfd = -1;
-  size_t n_events_ = 0;
+  int wake_fd_ = -1;
+  std::atomic_size_t n_events_{0};
+  std::recursive_mutex registration_mutex_;
+  std::vector<EventContext *> retired_events_;
+  EventContext wake_context_{};
   int n_triggered_events_ = 0;
   struct epoll_event triggered_events_[kMaxEventsPerIteration];
 };

@@ -9,6 +9,7 @@ endif()
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
+find_package(std_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
@@ -32,6 +33,7 @@ add_executable(odrive_can_node
 
 ament_target_dependencies(odrive_can_node
   rclcpp
+  std_msgs
   std_srvs
 )
 
@@ -50,5 +52,22 @@ rosidl_get_typesupport_target(cpp_typesupport_target
   ${PROJECT_NAME} rosidl_typesupport_cpp)
 
 target_link_libraries(odrive_can_node "${cpp_typesupport_target}")
+
+if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
+
+  ament_add_gtest(
+    test_odrive_protocol_policy
+    test/test_odrive_protocol_policy.cpp
+  )
+  target_include_directories(test_odrive_protocol_policy PRIVATE include)
+
+  ament_add_gtest(
+    test_epoll_event_loop
+    test/test_epoll_event_loop.cpp
+    ../odrive_base/src/epoll_event_loop.cpp
+  )
+  target_include_directories(test_epoll_event_loop PRIVATE ../odrive_base/include)
+endif()
 
 ament_package()

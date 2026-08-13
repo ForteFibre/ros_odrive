@@ -72,15 +72,23 @@ bool SocketCanIntf::init(
 
 void SocketCanIntf::deinit()
 {
-  if (!broken_) {
+  if (!broken_ && event_loop_ != nullptr && socket_evt_id_ != nullptr) {
     event_loop_->deregister_event(socket_evt_id_);
+    socket_evt_id_ = nullptr;
   }
-  close(socket_id_);
+  if (socket_id_ >= 0) {
+    close(socket_id_);
+    socket_id_ = -1;
+  }
   broken_ = true;
 }
 
 bool SocketCanIntf::send_can_frame(const can_frame & frame)
 {
+  if (broken_ || socket_id_ < 0) {
+    std::cerr << "Cannot send CAN frame: interface is not available" << std::endl;
+    return false;
+  }
   ssize_t nbytes = write(socket_id_, &frame, sizeof(frame));
   if (nbytes == -1) {
     std::cerr << "Failed to send CAN frame" << std::endl;
