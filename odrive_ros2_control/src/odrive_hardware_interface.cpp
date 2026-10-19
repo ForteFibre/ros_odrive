@@ -3,6 +3,7 @@
 #include "can_simple_messages.hpp"
 #include "hardware_interface/system_interface.hpp"
 #include "hardware_interface/types/hardware_interface_type_values.hpp"
+#include "hardware_interface/version.h"
 #include "odrive_enums.h"
 #include "pluginlib/class_list_macros.hpp"
 #include "rclcpp/rclcpp.hpp"
@@ -17,7 +18,12 @@ public:
     using return_type = hardware_interface::return_type;
     using State = rclcpp_lifecycle::State;
 
+// on_init(const HardwareInfo&) is deprecated since 4.34 and removed in 6 (lyrical)
+#if HARDWARE_INTERFACE_VERSION_GTE(4, 34, 0)
+    CallbackReturn on_init(const hardware_interface::HardwareComponentInterfaceParams& params) override;
+#else
     CallbackReturn on_init(const hardware_interface::HardwareInfo& info) override;
+#endif
     CallbackReturn on_configure(const State& previous_state) override;
     CallbackReturn on_cleanup(const State& previous_state) override;
     CallbackReturn on_activate(const State& previous_state) override;
@@ -107,8 +113,13 @@ using namespace odrive_ros2_control;
 using hardware_interface::CallbackReturn;
 using hardware_interface::return_type;
 
+#if HARDWARE_INTERFACE_VERSION_GTE(4, 34, 0)
+CallbackReturn ODriveHardwareInterface::on_init(const hardware_interface::HardwareComponentInterfaceParams& params) {
+    if (hardware_interface::SystemInterface::on_init(params) != CallbackReturn::SUCCESS) {
+#else
 CallbackReturn ODriveHardwareInterface::on_init(const hardware_interface::HardwareInfo& info) {
     if (hardware_interface::SystemInterface::on_init(info) != CallbackReturn::SUCCESS) {
+#endif
         return CallbackReturn::ERROR;
     }
 
